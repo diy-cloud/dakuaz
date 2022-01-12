@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/go-redis/redis/v8"
-	"github.com/snowmerak/dakuaz/dakuaz"
+	"github.com/snowmerak/dakuaz"
 )
 
 var client *redis.Client
