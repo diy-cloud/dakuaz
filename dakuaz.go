@@ -18,17 +18,15 @@ const ChunkSize = 64
 
 const HashLevel = 32
 
-const TokenSize = 64
 const IdSize = HashLevel
 const classSize = 1
 const levelSize = 1
 const expireTimeSize = 8
 const boolSize = 1
 const SignatureSize = 114
-const DakuazSize = TokenSize + IdSize + classSize + levelSize + expireTimeSize + boolSize + SignatureSize
+const DakuazSize = IdSize + classSize + levelSize + expireTimeSize + boolSize + SignatureSize
 
 type Dakuaz struct {
-	Token     [TokenSize]byte
 	Id        [IdSize]byte
 	Class     int8
 	Level     int8
@@ -41,9 +39,8 @@ type Dakuaz struct {
 	seed   [57]byte
 }
 
-func New(hasher func([]byte) [HashLevel]byte, tokenID [TokenSize]byte, seed [57]byte, id string, class int8, level int8, duration time.Duration, echo bool) *Dakuaz {
+func New(hasher func([]byte) [HashLevel]byte, seed [57]byte, id string, class int8, level int8, duration time.Duration, echo bool) *Dakuaz {
 	d := &Dakuaz{}
-	d.Token = tokenID
 	d.Id = hasher([]byte(id))
 	d.Class = class
 	d.Level = level
@@ -56,15 +53,14 @@ func New(hasher func([]byte) [HashLevel]byte, tokenID [TokenSize]byte, seed [57]
 }
 
 func (d *Dakuaz) makeHash() error {
-	buf := [TokenSize + IdSize + classSize + levelSize + expireTimeSize + boolSize]byte{}
-	copy(buf[:TokenSize], d.Token[:])
-	copy(buf[TokenSize:TokenSize+IdSize], d.Id[:])
-	buf[TokenSize+IdSize] = byte(d.Class)
-	buf[TokenSize+IdSize+classSize] = byte(d.Level)
-	binary.BigEndian.PutUint64(buf[TokenSize+IdSize+classSize+levelSize:], uint64(d.ExpireAt))
-	buf[TokenSize+IdSize+classSize+levelSize+expireTimeSize] = byte(0)
+	buf := [IdSize + classSize + levelSize + expireTimeSize + boolSize]byte{}
+	copy(buf[:IdSize], d.Id[:])
+	buf[IdSize] = byte(d.Class)
+	buf[IdSize+classSize] = byte(d.Level)
+	binary.BigEndian.PutUint64(buf[IdSize+classSize+levelSize:], uint64(d.ExpireAt))
+	buf[IdSize+classSize+levelSize+expireTimeSize] = byte(0)
 	if d.Echo {
-		buf[TokenSize+IdSize+classSize+levelSize+expireTimeSize] = byte(1)
+		buf[IdSize+classSize+levelSize+expireTimeSize] = byte(1)
 	}
 	d.hash = d.hasher(buf[:])
 	return nil
@@ -83,36 +79,34 @@ func (d *Dakuaz) makeSignature() error {
 	return nil
 }
 
-func (d *Dakuaz) Serialize() ([TokenSize + IdSize + classSize + levelSize + expireTimeSize + boolSize + SignatureSize]byte, error) {
-	buf := [TokenSize + IdSize + classSize + levelSize + expireTimeSize + boolSize + SignatureSize]byte{}
+func (d *Dakuaz) Serialize() ([IdSize + classSize + levelSize + expireTimeSize + boolSize + SignatureSize]byte, error) {
+	buf := [IdSize + classSize + levelSize + expireTimeSize + boolSize + SignatureSize]byte{}
 	if err := d.makeSignature(); err != nil {
 		return buf, err
 	}
-	copy(buf[:TokenSize], d.Token[:])
-	copy(buf[TokenSize:TokenSize+IdSize], d.Id[:])
-	buf[TokenSize+IdSize] = byte(d.Class)
-	buf[TokenSize+IdSize+classSize] = byte(d.Level)
-	binary.BigEndian.PutUint64(buf[TokenSize+IdSize+classSize+levelSize:], uint64(d.ExpireAt))
-	buf[TokenSize+IdSize+classSize+levelSize+expireTimeSize] = byte(0)
+	copy(buf[:IdSize], d.Id[:])
+	buf[IdSize] = byte(d.Class)
+	buf[IdSize+classSize] = byte(d.Level)
+	binary.BigEndian.PutUint64(buf[IdSize+classSize+levelSize:], uint64(d.ExpireAt))
+	buf[IdSize+classSize+levelSize+expireTimeSize] = byte(0)
 	if d.Echo {
-		buf[TokenSize+IdSize+classSize+levelSize+expireTimeSize] = byte(1)
+		buf[IdSize+classSize+levelSize+expireTimeSize] = byte(1)
 	}
-	copy(buf[TokenSize+IdSize+classSize+levelSize+expireTimeSize+boolSize:TokenSize+IdSize+classSize+levelSize+expireTimeSize+boolSize+SignatureSize], d.Signature[:])
+	copy(buf[IdSize+classSize+levelSize+expireTimeSize+boolSize:IdSize+classSize+levelSize+expireTimeSize+boolSize+SignatureSize], d.Signature[:])
 	return buf, nil
 }
 
-func Deserialize(buf [TokenSize + IdSize + classSize + levelSize + expireTimeSize + boolSize + SignatureSize]byte) *Dakuaz {
+func Deserialize(buf [IdSize + classSize + levelSize + expireTimeSize + boolSize + SignatureSize]byte) *Dakuaz {
 	d := &Dakuaz{}
-	copy(d.Token[:], buf[:TokenSize])
-	copy(d.Id[:], buf[TokenSize:TokenSize+IdSize])
-	d.Class = int8(buf[TokenSize+IdSize])
-	d.Level = int8(buf[TokenSize+IdSize+classSize])
-	d.ExpireAt = int64(binary.BigEndian.Uint64(buf[TokenSize+IdSize+classSize+levelSize : TokenSize+IdSize+classSize+levelSize+expireTimeSize]))
+	copy(d.Id[:], buf[:IdSize])
+	d.Class = int8(buf[IdSize])
+	d.Level = int8(buf[IdSize+classSize])
+	d.ExpireAt = int64(binary.BigEndian.Uint64(buf[IdSize+classSize+levelSize : IdSize+classSize+levelSize+expireTimeSize]))
 	d.Echo = false
-	if buf[TokenSize+IdSize+classSize+levelSize+expireTimeSize] == byte(1) {
+	if buf[+IdSize+classSize+levelSize+expireTimeSize] == byte(1) {
 		d.Echo = true
 	}
-	copy(d.Signature[:], buf[TokenSize+IdSize+classSize+levelSize+expireTimeSize+boolSize:TokenSize+IdSize+classSize+levelSize+expireTimeSize+boolSize+SignatureSize])
+	copy(d.Signature[:], buf[IdSize+classSize+levelSize+expireTimeSize+boolSize:IdSize+classSize+levelSize+expireTimeSize+boolSize+SignatureSize])
 	return d
 }
 
