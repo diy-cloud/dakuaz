@@ -1,18 +1,25 @@
 package dakuaz
 
 import (
+	"bytes"
 	"crypto"
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/cloudflare/circl/sign/ed448"
 	"golang.org/x/crypto/blake2b"
+	"golang.org/x/crypto/chacha20"
 )
 
+const ChunkSize = 64
+
+const HashLevel = 32
+
 const TokenSize = 64
-const IdSize = 32
+const IdSize = HashLevel
 const classSize = 1
 const levelSize = 1
 const expireTimeSize = 8
@@ -29,43 +36,45 @@ type Dakuaz struct {
 	Echo      bool
 	Signature [SignatureSize]byte
 
-	hash [32]byte
+	hasher func([]byte) [HashLevel]byte
+	hash   [HashLevel]byte
+	seed   [57]byte
 }
 
-func New(id string, class int8, level int8, duration time.Duration, echo bool) *Dakuaz {
+func New(hasher func([]byte) [HashLevel]byte, tokenID [TokenSize]byte, seed [57]byte, id string, class int8, level int8, duration time.Duration, echo bool) *Dakuaz {
 	d := &Dakuaz{}
-	d.Id = blake2b.Sum256([]byte(id))
+	d.Token = tokenID
+	d.Id = hasher([]byte(id))
 	d.Class = class
 	d.Level = level
 	d.ExpireAt = time.Now().Add(duration).Unix()
 	d.Echo = echo
+
+	d.seed = seed
+	d.hasher = hasher
 	return d
 }
 
-func (d *Dakuaz) RegisterTokenID(tokenID [64]byte) {
-	d.Token = tokenID
-}
-
-func (d *Dakuaz) MakeHash() error {
-	hash, err := blake2b.New256(nil)
-	if err != nil {
-		return err
+func (d *Dakuaz) makeHash() error {
+	buf := [TokenSize + IdSize + classSize + levelSize + expireTimeSize + boolSize]byte{}
+	copy(buf[:TokenSize], d.Token[:])
+	copy(buf[TokenSize:TokenSize+IdSize], d.Id[:])
+	buf[TokenSize+IdSize] = byte(d.Class)
+	buf[TokenSize+IdSize+classSize] = byte(d.Level)
+	binary.BigEndian.PutUint64(buf[TokenSize+IdSize+classSize+levelSize:], uint64(d.ExpireAt))
+	buf[TokenSize+IdSize+classSize+levelSize+expireTimeSize] = byte(0)
+	if d.Echo {
+		buf[TokenSize+IdSize+classSize+levelSize+expireTimeSize] = byte(1)
 	}
-	hash.Write(d.Token[:])
-	hash.Write(d.Id[:])
-	buf := [8]byte{}
-	binary.BigEndian.PutUint64(buf[:], uint64(d.Class))
-	hash.Write(buf[:])
-	binary.BigEndian.PutUint64(buf[:], uint64(d.Level))
-	hash.Write(buf[:])
-	binary.BigEndian.PutUint64(buf[:], uint64(d.ExpireAt))
-	hash.Write(buf[:])
-	d.hash = blake2b.Sum256(hash.Sum(nil))
+	d.hash = d.hasher(buf[:])
 	return nil
 }
 
-func (d *Dakuaz) MakeSignature(seed [57]byte) error {
-	priv := ed448.NewKeyFromSeed(seed[:])
+func (d *Dakuaz) makeSignature() error {
+	priv := ed448.NewKeyFromSeed(d.seed[:])
+	if err := d.makeHash(); err != nil {
+		return err
+	}
 	sign, err := priv.Sign(rand.Reader, d.hash[:], crypto.Hash(0))
 	if err != nil {
 		return fmt.Errorf("dakuaz.MakeSignature: %w", err)
@@ -74,8 +83,11 @@ func (d *Dakuaz) MakeSignature(seed [57]byte) error {
 	return nil
 }
 
-func (d *Dakuaz) Serialize() [TokenSize + IdSize + classSize + levelSize + expireTimeSize + boolSize + SignatureSize]byte {
+func (d *Dakuaz) Serialize() ([TokenSize + IdSize + classSize + levelSize + expireTimeSize + boolSize + SignatureSize]byte, error) {
 	buf := [TokenSize + IdSize + classSize + levelSize + expireTimeSize + boolSize + SignatureSize]byte{}
+	if err := d.makeSignature(); err != nil {
+		return buf, err
+	}
 	copy(buf[:TokenSize], d.Token[:])
 	copy(buf[TokenSize:TokenSize+IdSize], d.Id[:])
 	buf[TokenSize+IdSize] = byte(d.Class)
@@ -86,7 +98,7 @@ func (d *Dakuaz) Serialize() [TokenSize + IdSize + classSize + levelSize + expir
 		buf[TokenSize+IdSize+classSize+levelSize+expireTimeSize] = byte(1)
 	}
 	copy(buf[TokenSize+IdSize+classSize+levelSize+expireTimeSize+boolSize:TokenSize+IdSize+classSize+levelSize+expireTimeSize+boolSize+SignatureSize], d.Signature[:])
-	return buf
+	return buf, nil
 }
 
 func Deserialize(buf [TokenSize + IdSize + classSize + levelSize + expireTimeSize + boolSize + SignatureSize]byte) *Dakuaz {
@@ -104,13 +116,11 @@ func Deserialize(buf [TokenSize + IdSize + classSize + levelSize + expireTimeSiz
 	return d
 }
 
-func (d *Dakuaz) Verify(key [57]byte) bool {
+func (d *Dakuaz) Verify(hasher func([]byte) [HashLevel]byte, key [57]byte) bool {
+	d.hasher = hasher
+	d.seed = key
 	priv := ed448.NewKeyFromSeed(key[:])
-	hash := d.Echo
-	if err := d.MakeHash(); err != nil {
-		return false
-	}
-	if hash != d.Echo {
+	if err := d.makeHash(); err != nil {
 		return false
 	}
 	return ed448.Verify(priv.Public().(ed448.PublicKey), d.hash[:], d.Signature[:], "")
@@ -120,15 +130,90 @@ func (d *Dakuaz) IsExpired() bool {
 	return time.Now().Unix() > d.ExpireAt
 }
 
-func (d *Dakuaz) Renew(seed [57]byte, duration time.Duration, class, level int8) error {
-	d.ExpireAt = time.Now().Add(duration).Unix()
-	d.Level = level
-	d.Class = class
-	if err := d.MakeHash(); err != nil {
-		return fmt.Errorf("dakuaz.Renew: %w", err)
+func Encrypt(data []byte, seed []byte) ([]byte, error) {
+	dst := bytes.NewBuffer(nil)
+	src := bytes.NewBuffer(data)
+	if err := encrypt(src, dst, seed); err != nil {
+		return nil, err
 	}
-	if err := d.MakeSignature(seed); err != nil {
-		return fmt.Errorf("dakuaz.Renew: %w", err)
+	return dst.Bytes(), nil
+}
+
+func Decrypt(data []byte, seed []byte) ([DakuazSize]byte, error) {
+	dst := bytes.NewBuffer(nil)
+	src := bytes.NewBuffer(data)
+	if err := decrypt(src, dst, seed); err != nil {
+		return [DakuazSize]byte{}, err
 	}
+	if dst.Len() != DakuazSize {
+		return [DakuazSize]byte{}, fmt.Errorf("dakuaz.Decrypt: invalid dakuaz size")
+	}
+	result := [DakuazSize]byte{}
+	copy(result[:], dst.Bytes())
+	return result, nil
+}
+
+func encrypt(src io.Reader, dst io.Writer, password []byte) error {
+	nonce := make([]byte, chacha20.NonceSizeX)
+	rand.Read(nonce)
+	if _, err := dst.Write(nonce); err != nil {
+		return err
+	}
+
+	hashed := blake2b.Sum256(password)
+	cipher, err := chacha20.NewUnauthenticatedCipher(hashed[:], nonce)
+	if err != nil {
+		return err
+	}
+
+	from := make([]byte, ChunkSize)
+	to := make([]byte, ChunkSize)
+
+	for {
+		n, err := src.Read(from)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return err
+		}
+		cipher.XORKeyStream(to, from[:n])
+		if _, err := dst.Write(to[:n]); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func decrypt(src io.Reader, dst io.Writer, password []byte) error {
+	nonce := make([]byte, chacha20.NonceSizeX)
+	if _, err := src.Read(nonce); err != nil {
+		return err
+	}
+
+	hashed := blake2b.Sum256(password)
+	cipher, err := chacha20.NewUnauthenticatedCipher(hashed[:], nonce)
+	if err != nil {
+		return err
+	}
+
+	from := make([]byte, ChunkSize)
+	to := make([]byte, ChunkSize)
+
+	for {
+		n, err := src.Read(from)
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return err
+		}
+		cipher.XORKeyStream(to, from[:n])
+		if _, err := dst.Write(to[:n]); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
